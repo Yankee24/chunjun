@@ -18,13 +18,13 @@
 
 package com.dtstack.chunjun.connector.hbase.util;
 
-import com.dtstack.chunjun.connector.hbase.conf.HBaseConf;
+import com.dtstack.chunjun.connector.hbase.config.HBaseConfig;
 import com.dtstack.chunjun.security.KerberosUtil;
 import com.dtstack.chunjun.util.FileSystemUtil;
 
-import org.apache.flink.runtime.util.ExecutorThreadFactory;
+import org.apache.flink.util.concurrent.ExecutorThreadFactory;
 
-import com.google.common.collect.ImmutableMap;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections.MapUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
@@ -37,59 +37,66 @@ import org.apache.hadoop.hbase.client.BufferedMutator;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.RegionLocator;
+import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.security.PrivilegedAction;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-import static com.dtstack.chunjun.connector.hbase.util.HBaseConfigUtils.KEY_HBASE_SECURITY_AUTHENTICATION;
-import static com.dtstack.chunjun.connector.hbase.util.HBaseConfigUtils.KEY_HBASE_SECURITY_AUTHORIZATION;
-import static com.dtstack.chunjun.connector.hbase.util.HBaseConfigUtils.KEY_HBASE_SECURITY_AUTH_ENABLE;
 import static com.dtstack.chunjun.connector.hbase.util.HBaseConfigUtils.KEY_JAVA_SECURITY_KRB5_CONF;
 import static com.dtstack.chunjun.security.KerberosUtil.KRB_STR;
 
-/**
- * The utility class of HBase
- *
- * <p>Company: www.dtstack.com
- *
- * @author huyifan.zju@163.com
- */
+/** The utility class of HBase */
+@Slf4j
 public class HBaseHelper {
-    private static final Logger LOG = LoggerFactory.getLogger(HBaseHelper.class);
 
-    public static Connection getHbaseConnection(HBaseConf hBaseConf) {
-        Map<String, Object> hbaseConfig = ImmutableMap.copyOf(hBaseConf.getHbaseConfig());
-        return getHbaseConnection(hbaseConfig);
+    private static final String KEY_HBASE_SECURITY_AUTHENTICATION = "hbase.security.authentication";
+    private static final String KEY_HBASE_SECURITY_AUTHORIZATION = "hbase.security.authorization";
+    private static final String KEY_HBASE_SECURITY_AUTH_ENABLE = "hbase.security.auth.enable";
+    private static final String KEY_HADOOP_USER_NAME = "hadoop.user.name";
+
+    public static Connection getHbaseConnection(
+            HBaseConfig hBaseConfig, String jobId, String taskNumber) {
+        Map<String, Object> hbaseConfig = new HashMap<>(hBaseConfig.getHbaseConfig());
+        return getHbaseConnection(hbaseConfig, jobId, taskNumber);
     }
 
-    public static Connection getHbaseConnection(Map<String, Object> hbaseConfigMap) {
+    public static Connection getHbaseConnection(
+            Map<String, Object> hbaseConfigMap, String jobId, String taskNumber) {
         Validate.isTrue(MapUtils.isNotEmpty(hbaseConfigMap), "hbaseConfig不能为空Map结构!");
 
         if (HBaseConfigUtils.isEnableKerberos(hbaseConfigMap)) {
-            return getConnectionWithKerberos(hbaseConfigMap);
+            return getConnectionWithKerberos(hbaseConfigMap, jobId, taskNumber);
         }
 
         try {
             Configuration hConfiguration = getConfig(hbaseConfigMap);
+            Object hadoopUser = hbaseConfigMap.get(KEY_HADOOP_USER_NAME);
+            // 如果配置的 hadoop 用户不为空，那么设置配置中的用户。
+            if (hadoopUser != null && StringUtils.isNotEmpty(hadoopUser.toString())) {
+                UserGroupInformation userGroupInformation =
+                        UserGroupInformation.createRemoteUser(hadoopUser.toString());
+                return ConnectionFactory.createConnection(
+                        hConfiguration, User.create(userGroupInformation));
+            }
             return ConnectionFactory.createConnection(hConfiguration);
         } catch (IOException e) {
-            LOG.error("Get connection fail with config:{}", hbaseConfigMap);
+            log.error("Get connection fail with config:{}", hbaseConfigMap);
             throw new RuntimeException(e);
         }
     }
 
-    private static Connection getConnectionWithKerberos(Map<String, Object> hbaseConfigMap) {
+    private static Connection getConnectionWithKerberos(
+            Map<String, Object> hbaseConfigMap, String jobId, String taskNumber) {
         try {
             setKerberosConf(hbaseConfigMap);
-            UserGroupInformation ugi = getUgi(hbaseConfigMap);
+            UserGroupInformation ugi = getUgi(hbaseConfigMap, jobId, taskNumber);
             return ugi.doAs(
                     (PrivilegedAction<Connection>)
                             () -> {
@@ -97,7 +104,7 @@ public class HBaseHelper {
                                     Configuration hConfiguration = getConfig(hbaseConfigMap);
                                     return ConnectionFactory.createConnection(hConfiguration);
                                 } catch (IOException e) {
-                                    LOG.error("Get connection fail with config:{}", hbaseConfigMap);
+                                    log.error("Get connection fail with config:{}", hbaseConfigMap);
                                     throw new RuntimeException(e);
                                 }
                             });
@@ -106,13 +113,14 @@ public class HBaseHelper {
         }
     }
 
-    public static UserGroupInformation getUgi(Map<String, Object> hbaseConfigMap)
+    public static UserGroupInformation getUgi(
+            Map<String, Object> hbaseConfigMap, String jobId, String taskNumber)
             throws IOException {
         String keytabFileName = KerberosUtil.getPrincipalFileName(hbaseConfigMap);
 
-        keytabFileName = KerberosUtil.loadFile(hbaseConfigMap, keytabFileName);
+        keytabFileName = KerberosUtil.loadFile(hbaseConfigMap, keytabFileName, jobId, taskNumber);
         String principal = KerberosUtil.getPrincipal(hbaseConfigMap, keytabFileName);
-        KerberosUtil.loadKrb5Conf(hbaseConfigMap);
+        KerberosUtil.loadKrb5Conf(hbaseConfigMap, jobId, taskNumber);
         KerberosUtil.refreshConfig();
 
         Configuration conf = FileSystemUtil.getConfiguration(hbaseConfigMap, null);
@@ -144,19 +152,13 @@ public class HBaseHelper {
 
     public static RegionLocator getRegionLocator(Connection hConnection, String userTable) {
         TableName hTableName = TableName.valueOf(userTable);
-        Admin admin = null;
-        RegionLocator regionLocator = null;
-        try {
-            admin = hConnection.getAdmin();
+        try (Admin admin = hConnection.getAdmin()) {
             HBaseHelper.checkHbaseTable(admin, hTableName);
-            regionLocator = hConnection.getRegionLocator(hTableName);
+            return hConnection.getRegionLocator(hTableName);
         } catch (Exception e) {
-            HBaseHelper.closeRegionLocator(regionLocator);
-            HBaseHelper.closeAdmin(admin);
             HBaseHelper.closeConnection(hConnection);
             throw new RuntimeException(e);
         }
-        return regionLocator;
     }
 
     public static byte[] convertRowKey(String rowKey, boolean isBinaryRowkey) {
@@ -233,15 +235,11 @@ public class HBaseHelper {
                         new ExecutorThreadFactory("UserGroupInformation-Relogin"));
 
         executor.scheduleWithFixedDelay(
-                new Runnable() {
-
-                    @Override
-                    public void run() {
-                        try {
-                            ugi.checkTGTAndReloginFromKeytab();
-                        } catch (Exception e) {
-                            LOG.error("Refresh TGT failed", e);
-                        }
+                () -> {
+                    try {
+                        ugi.checkTGTAndReloginFromKeytab();
+                    } catch (Exception e) {
+                        log.error("Refresh TGT failed", e);
                     }
                 },
                 0,
