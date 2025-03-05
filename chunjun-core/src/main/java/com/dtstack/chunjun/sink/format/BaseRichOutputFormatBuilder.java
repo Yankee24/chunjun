@@ -18,24 +18,12 @@
 
 package com.dtstack.chunjun.sink.format;
 
-import com.dtstack.chunjun.cdc.monitor.MonitorConf;
-import com.dtstack.chunjun.conf.ChunJunCommonConf;
+import com.dtstack.chunjun.cdc.config.DDLConfig;
+import com.dtstack.chunjun.config.CommonConfig;
 import com.dtstack.chunjun.constants.ConstantValue;
 import com.dtstack.chunjun.converter.AbstractRowConverter;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-/**
- * The builder of RichOutputFormat
- *
- * <p>Company: www.dtstack.com
- *
- * @author huyifan.zju@163.com
- */
 public abstract class BaseRichOutputFormatBuilder<T extends BaseRichOutputFormat> {
-
-    protected final Logger LOG = LoggerFactory.getLogger(getClass());
 
     protected T format;
 
@@ -43,12 +31,12 @@ public abstract class BaseRichOutputFormatBuilder<T extends BaseRichOutputFormat
         this.format = format;
     }
 
-    public void setConfig(ChunJunCommonConf config) {
-        format.setConfig(config);
+    public void setDdlConfig(DDLConfig ddlConfig) {
+        format.setDdlConfig(ddlConfig);
     }
 
-    public void setMonitorConfig(MonitorConf config) {
-        format.setMonitorConf(config);
+    public void setConfig(CommonConfig config) {
+        format.setConfig(config);
     }
 
     public void setInitAccumulatorAndDirty(boolean initAccumulatorAndDirty) {

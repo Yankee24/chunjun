@@ -18,18 +18,18 @@
 
 package com.dtstack.chunjun.connector.hive3.util;
 
-import com.dtstack.chunjun.conf.FieldConf;
-import com.dtstack.chunjun.connector.hive3.conf.HdfsConf;
-import com.dtstack.chunjun.connector.hive3.converter.HdfsOrcColumnConverter;
-import com.dtstack.chunjun.connector.hive3.converter.HdfsOrcRowConverter;
-import com.dtstack.chunjun.connector.hive3.converter.HdfsParquetColumnConverter;
-import com.dtstack.chunjun.connector.hive3.converter.HdfsParquetRowConverter;
-import com.dtstack.chunjun.connector.hive3.converter.HdfsTextColumnConverter;
-import com.dtstack.chunjun.connector.hive3.converter.HdfsTextRowConverter;
+import com.dtstack.chunjun.config.FieldConfig;
+import com.dtstack.chunjun.connector.hive3.config.HdfsConfig;
+import com.dtstack.chunjun.connector.hive3.converter.HdfsOrcSqlConverter;
+import com.dtstack.chunjun.connector.hive3.converter.HdfsOrcSyncConverter;
+import com.dtstack.chunjun.connector.hive3.converter.HdfsParquetSqlConverter;
+import com.dtstack.chunjun.connector.hive3.converter.HdfsParquetSyncConverter;
+import com.dtstack.chunjun.connector.hive3.converter.HdfsTextSqlConverter;
+import com.dtstack.chunjun.connector.hive3.converter.HdfsTextSyncConverter;
 import com.dtstack.chunjun.connector.hive3.enums.FileType;
 import com.dtstack.chunjun.connector.hive3.source.HdfsPathFilter;
 import com.dtstack.chunjun.converter.AbstractRowConverter;
-import com.dtstack.chunjun.converter.RawTypeConverter;
+import com.dtstack.chunjun.converter.RawTypeMapper;
 import com.dtstack.chunjun.enums.ColumnType;
 import com.dtstack.chunjun.security.KerberosUtil;
 import com.dtstack.chunjun.throwable.UnsupportedTypeException;
@@ -40,7 +40,8 @@ import com.dtstack.chunjun.util.TableUtil;
 import org.apache.flink.api.common.cache.DistributedCache;
 import org.apache.flink.table.types.logical.RowType;
 
-import org.apache.commons.collections.MapUtils;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.MapUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.hadoop.conf.Configuration;
@@ -71,8 +72,6 @@ import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.parquet.io.api.Binary;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.lang.reflect.Constructor;
@@ -86,9 +85,8 @@ import java.util.Set;
 
 import static com.dtstack.chunjun.security.KerberosUtil.KRB_STR;
 
-/** @author liuliu 2022/3/22 */
+@Slf4j
 public class Hive3Util {
-    private static final Logger LOG = LoggerFactory.getLogger(Hive3Util.class);
     public static final String NULL_VALUE = "\\N";
 
     private static final long NANO_SECONDS_PER_DAY = 86400_000_000_000L;
@@ -157,21 +155,21 @@ public class Hive3Util {
     public static AbstractRowConverter createRowConverter(
             boolean useAbstractBaseColumn,
             String fileType,
-            List<FieldConf> fieldConfList,
-            RawTypeConverter rawTypeConverter,
-            HdfsConf hdfsConf) {
+            List<FieldConfig> fieldConfList,
+            RawTypeMapper rawTypeMapper,
+            HdfsConfig hdfsConfig) {
         AbstractRowConverter rowConverter;
-        RowType rowType = TableUtil.createRowType(fieldConfList, rawTypeConverter);
+        RowType rowType = TableUtil.createRowType(fieldConfList, rawTypeMapper);
         if (useAbstractBaseColumn) {
             switch (FileType.getByName(fileType)) {
                 case ORC:
-                    rowConverter = new HdfsOrcColumnConverter(rowType, hdfsConf);
+                    rowConverter = new HdfsOrcSyncConverter(rowType, hdfsConfig);
                     break;
                 case PARQUET:
-                    rowConverter = new HdfsParquetColumnConverter(rowType, hdfsConf);
+                    rowConverter = new HdfsParquetSyncConverter(rowType, hdfsConfig);
                     break;
                 case TEXT:
-                    rowConverter = new HdfsTextColumnConverter(rowType, hdfsConf);
+                    rowConverter = new HdfsTextSyncConverter(rowType, hdfsConfig);
                     break;
                 default:
                     throw new UnsupportedTypeException(fileType);
@@ -179,13 +177,13 @@ public class Hive3Util {
         } else {
             switch (FileType.getByName(fileType)) {
                 case ORC:
-                    rowConverter = new HdfsOrcRowConverter(rowType, hdfsConf);
+                    rowConverter = new HdfsOrcSqlConverter(rowType, hdfsConfig);
                     break;
                 case PARQUET:
-                    rowConverter = new HdfsParquetRowConverter(rowType, hdfsConf);
+                    rowConverter = new HdfsParquetSqlConverter(rowType, hdfsConfig);
                     break;
                 case TEXT:
-                    rowConverter = new HdfsTextRowConverter(rowType, hdfsConf);
+                    rowConverter = new HdfsTextSqlConverter(rowType, hdfsConfig);
                     break;
                 default:
                     throw new UnsupportedTypeException(fileType);
@@ -348,7 +346,7 @@ public class Hive3Util {
                                                 decimalInfo.getPrecision(),
                                                 decimalInfo.getScale()));
                     } catch (Exception e) {
-                        LOG.warn(
+                        log.warn(
                                 "can't create WritableHiveDecimalObjectInspector from {}",
                                 decimalInfo,
                                 e);
@@ -406,7 +404,7 @@ public class Hive3Util {
         try {
             findAllPartitionPath(paths, fileSystem, inputPath, pathFilter);
         } catch (IOException e) {
-            LOG.error(
+            log.error(
                     "retrieve all partition error, hdfs input path {},errMsg {}",
                     inputPath,
                     ExceptionUtil.getErrorMessage(e));
@@ -484,26 +482,26 @@ public class Hive3Util {
 
     public static void setHadoopUserName(Configuration conf) {
         String hadoopUserName = conf.get(KEY_HADOOP_USER_NAME);
-        if (org.apache.commons.lang.StringUtils.isEmpty(hadoopUserName)) {
+        if (StringUtils.isEmpty(hadoopUserName)) {
             return;
         }
 
         try {
             String previousUserName = UserGroupInformation.getLoginUser().getUserName();
-            LOG.info(
+            log.info(
                     "Hadoop user from '{}' switch to '{}' with SIMPLE auth",
                     previousUserName,
                     hadoopUserName);
             UserGroupInformation ugi = UserGroupInformation.createRemoteUser(hadoopUserName);
             UserGroupInformation.setLoginUser(ugi);
         } catch (Exception e) {
-            LOG.warn("Set hadoop user name error:", e);
+            log.warn("Set hadoop user name error:", e);
         }
     }
 
     private static FileSystem getFsWithUser(
             Map<String, Object> hadoopConfig, String defaultFs, String user) throws Exception {
-        if (org.apache.commons.lang.StringUtils.isEmpty(user)) {
+        if (StringUtils.isEmpty(user)) {
             return FileSystem.get(getConfiguration(hadoopConfig, defaultFs));
         }
         UserGroupInformation ugi = UserGroupInformation.createRemoteUser(user);
@@ -522,10 +520,13 @@ public class Hive3Util {
             Map<String, Object> hadoopConfigMap,
             String defaultFs,
             String user,
-            DistributedCache distributedCache)
+            DistributedCache distributedCache,
+            String jobId,
+            String taskNumber)
             throws Exception {
         if (isOpenKerberos(hadoopConfigMap)) {
-            return getFsWithKerberos(hadoopConfigMap, defaultFs, distributedCache);
+            return getFsWithKerberos(
+                    hadoopConfigMap, defaultFs, distributedCache, jobId, taskNumber);
         }
         return getFsWithUser(hadoopConfigMap, defaultFs, user);
     }
@@ -533,10 +534,13 @@ public class Hive3Util {
     public static FileSystem getFileSystem(
             Map<String, Object> hadoopConfigMap,
             String defaultFs,
-            DistributedCache distributedCache)
+            DistributedCache distributedCache,
+            String jobId,
+            String taskNumber)
             throws Exception {
         if (isOpenKerberos(hadoopConfigMap)) {
-            return getFsWithKerberos(hadoopConfigMap, defaultFs, distributedCache);
+            return getFsWithKerberos(
+                    hadoopConfigMap, defaultFs, distributedCache, jobId, taskNumber);
         }
 
         Configuration conf = getConfiguration(hadoopConfigMap, defaultFs);
@@ -546,9 +550,14 @@ public class Hive3Util {
     }
 
     private static FileSystem getFsWithKerberos(
-            Map<String, Object> hadoopConfig, String defaultFs, DistributedCache distributedCache)
+            Map<String, Object> hadoopConfig,
+            String defaultFs,
+            DistributedCache distributedCache,
+            String jobId,
+            String taskNumber)
             throws Exception {
-        UserGroupInformation ugi = getUGI(hadoopConfig, defaultFs, distributedCache);
+        UserGroupInformation ugi =
+                getUGI(hadoopConfig, defaultFs, distributedCache, jobId, taskNumber);
 
         return ugi.doAs(
                 (PrivilegedAction<FileSystem>)
@@ -563,12 +572,18 @@ public class Hive3Util {
     }
 
     public static UserGroupInformation getUGI(
-            Map<String, Object> hadoopConfig, String defaultFs, DistributedCache distributedCache)
+            Map<String, Object> hadoopConfig,
+            String defaultFs,
+            DistributedCache distributedCache,
+            String jobId,
+            String taskNumber)
             throws IOException {
         String keytabFileName = KerberosUtil.getPrincipalFileName(hadoopConfig);
-        keytabFileName = KerberosUtil.loadFile(hadoopConfig, keytabFileName, distributedCache);
+        keytabFileName =
+                KerberosUtil.loadFile(
+                        hadoopConfig, keytabFileName, distributedCache, jobId, taskNumber);
         String principal = KerberosUtil.getPrincipal(hadoopConfig, keytabFileName);
-        KerberosUtil.loadKrb5Conf(hadoopConfig, distributedCache);
+        KerberosUtil.loadKrb5Conf(hadoopConfig, distributedCache, jobId, taskNumber);
         KerberosUtil.refreshConfig();
 
         return KerberosUtil.loginAndReturnUgi(
@@ -595,7 +610,6 @@ public class Hive3Util {
     }
 
     private static boolean isHaMode(Map<String, Object> confMap) {
-        return org.apache.commons.lang.StringUtils.isNotEmpty(
-                MapUtils.getString(confMap, KEY_DFS_NAME_SERVICES));
+        return StringUtils.isNotEmpty(MapUtils.getString(confMap, KEY_DFS_NAME_SERVICES));
     }
 }
